@@ -14,12 +14,13 @@ workflow files are in this repo.
 |---|---|---|
 | `tennis-tour-draws.yml` | `tennis/tour-draws.json` on R2 | every 3 hours at :41 |
 | `player-index.yml` | `afl/player-index.json`, `football/player-index/*` on R2 | every 6 hours at :23 |
+| `keepalive.yml` | nothing: re-enables the workflows above, since GitHub disables a public repo's schedules after 60 days without activity | 1st and 15th, 03:07 |
 
 ## Secrets
 
 | secret | what it is |
 |---|---|
-| `ITG_READ_TOKEN` | Fine-grained PAT, repository `peteowen1/inthegame-blog` only, **Contents: Read-only** |
+| `ITG_READ_TOKEN` | Fine-grained PAT, repository `peteowen1/inthegame-blog` only, **Contents: Read-only**. Expires about 2027-10-24; when it does, every checkout fails red. Make a new one with the same settings and replace the secret. |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API token with **Workers R2 Storage: Edit** on the inthegame.blog account |
 | `CLOUDFLARE_ACCOUNT_ID` | The inthegame.blog Cloudflare account id |
 
