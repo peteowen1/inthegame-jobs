@@ -1,0 +1,117 @@
+# MOVED 2026-10-24 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes. The steps are
+# unchanged; only the checkout now pulls the private repo in. See README.md.
+#
+# Publish tennis/tour-draws.json to R2: the bracket, byes and results of every
+# WTA 250/500/1000 in progress, from the WTA's own draw feed. The Slams keep
+# their own file and workflow (tennis-draw.yml); this exists so the simulator
+# can run at tour events too. Plan: docs/plans/TENNIS-ALL-EVENTS-SIM.md.
+name: Tennis tour draws
+
+on:
+  schedule:
+    # Every three hours, all year. Set when this ran in the private repo, where
+    # every run was billed; free here, but the simulator only uses COMPLETED
+    # results, and a tour day's matches finish over many hours, so a
+    # three-hour lag still costs little.
+    - cron: "41 */3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: tennis-tour-draws
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install hyparquet (reads dropshot's ratings to join player ids)
+        run: npm ci --no-audit --no-fund
+
+      - name: Install pdftotext (reads the ATP draw sheets)
+        # apt-get update first: the runner image's package index goes stale
+        # when Ubuntu replaces a poppler build, and the install then 404s on the
+        # old file (2026-10-08 19:00 UTC, and the first run after #863).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends poppler-utils >/dev/null
+          pdftotext -v 2>&1 | head -1
+
+      - name: Test the builders and the simulator's tour-event path
+        run: |
+          node scripts/build-tennis-tour-draw.test.mjs
+          node scripts/build-tennis-atp-draw.test.mjs
+          node scripts/tennis-tour-sim.test.mjs
+
+      - name: Build tour-draws.json
+        id: build
+        run: |
+          # 78 = no tour-level WTA event in progress (or none has its draw yet):
+          # nothing to publish, R2 keeps the previous file. Anything else
+          # non-zero fails the job, because the builder only refuses when the
+          # feed's shape stopped matching what it checks.
+          set +e
+          node scripts/build-tennis-tour-draw.mjs --out tour-draws.json
+          rc=$?
+          set -e
+          if [ "$rc" = "78" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$rc" = "0" ] || exit "$rc"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to R2
+        if: steps.build.outputs.skip != 'true'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4"
+          # --remote is REQUIRED in wrangler v4, or the write goes to a local
+          # simulation and the job passes having published nothing.
+          command: r2 object put inthegame-data/tennis/tour-draws.json --file tour-draws.json --content-type application/json --cache-control "public, max-age=300" --remote
+
+      - name: Confirm what is actually served
+        if: steps.build.outputs.skip != 'true'
+        run: |
+          sleep 5
+          curl -sS "https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/tennis/tour-draws.json?cb=$RANDOM" -o served.json \
+            -w 'status=%{http_code} bytes=%{size_download}\n'
+          node -e "
+            const s = JSON.parse(require('fs').readFileSync('served.json','utf8'));
+            for (const t of s.tournaments) {
+              const d = t.draws[t.tour] || t.draws.wta || t.draws.atp;
+              console.log(t.name, '|', d.slots.length, 'lines,', d.matches.filter(m => m.winner_slot != null && m.status !== 'Bye').length, 'decided');
+            }
+            const age = Date.now() - Date.parse(s.generated_at);
+            if (!(age < 15 * 60 * 1000)) { console.error('served copy is', Math.round(age / 60000), 'minutes old - the upload did not take'); process.exit(1); }
+          "
+
+      - name: Fail the run if any event could not be rebuilt
+        # always(): it must still report when the confirm step above failed.
+        if: always() && steps.build.outputs.skip != 'true'
+        run: |
+          # The builder publishes the events that worked and keeps the last
+          # copy of any that did not, so the others stay fresh. This step is
+          # what keeps a stale event from going unnoticed.
+          if [ -f tour-draws.json.failures ]; then
+            echo "These events kept their previous copy:"; cat tour-draws.json.failures
+            exit 1
+          fi

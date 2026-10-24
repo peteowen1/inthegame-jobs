@@ -1,0 +1,156 @@
+# MOVED 2026-10-24 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes. The steps are
+# unchanged; only the checkout now pulls the private repo in. See README.md.
+#
+# Publish the player indexes to R2, the data behind the findable player pages:
+#   afl/player-index.json            one row per rated AFL player (/afl/player/<name>-<id>)
+#   football/player-index/<k>.json   36 shards by the Opta id's first character,
+#   football/player-index/sitemap.xml  plus the football sitemap (/football/player/<name>-<id>)
+# Plan: docs/plans/PLAYER-PAGES-SEO-2026-09-23.md.
+#
+# WHY HERE AND NOT IN THE WORKER. The index is derived from afl/ratings.parquet
+# (137k rows). Parsing that inside a Worker cron is at the mercy of the Worker
+# CPU limit; a GitHub runner parses it in seconds with the same hyparquet the
+# site already uses, and this repo already publishes JSON to R2 this way
+# (tennis-draw.yml, afl-live-chains.yml).
+name: Player index
+
+on:
+  schedule:
+    # Every 6 hours. torpdata refreshes ratings after games (2AM daily, plus
+    # 10PM Thu-Sun and 4PM Sat-Sun AEST), so 6 hours bounds how stale a player
+    # page's summary can be behind the ratings file. A run is ~1 minute.
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+  # The on-merge run (when scripts/build-player-index.mjs changes on main)
+  # stays in inthegame-blog's player-index.yml: a push there cannot trigger a
+  # workflow here.
+
+concurrency:
+  group: player-index
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install hyparquet
+        run: npm ci
+
+      - name: Test the builder
+        run: |
+          node scripts/build-player-index.test.mjs
+          node scripts/player-pages.test.mjs
+
+      - name: Build the index
+        # The builder refuses to write (non-zero exit) on fewer than 1,000
+        # players, a malformed player_id or a duplicate slug, so a bad ratings
+        # file cannot replace a good index.
+        run: node scripts/build-player-index.mjs --out player-index.json
+
+      - name: Upload to R2
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4"
+          # --remote is REQUIRED in wrangler v4 for R2 uploads; without it the
+          # write goes to a local simulation and the job passes having published
+          # nothing.
+          command: r2 object put inthegame-data/afl/player-index.json --file player-index.json --content-type application/json --cache-control "public, max-age=300" --remote
+
+      - name: Confirm what is actually served
+        run: |
+          # Trust the served copy, not the upload's exit code; cache-busted so a
+          # stale edge copy cannot make a failed publish look fine.
+          sleep 5
+          url="https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/afl/player-index.json?cb=$RANDOM"
+          curl -sS "$url" -o served.json -w 'status=%{http_code} bytes=%{size_download}\n'
+          node -e "
+            const s = JSON.parse(require('fs').readFileSync('served.json','utf8'));
+            console.log('served built_at:', s.built_at, '| players:', s.count, '| as at', s.season, 'R' + s.round);
+            const age = Date.now() - Date.parse(s.built_at);
+            if (!(age < 15 * 60 * 1000)) { console.error('served copy is', Math.round(age / 60000), 'minutes old - the upload did not take'); process.exit(1); }
+            if (!(s.count >= 1000)) { console.error('served index has only', s.count, 'players'); process.exit(1); }
+          "
+
+      - name: Build the football index
+        # Same guard (at least 10,000 players, no malformed id, no duplicate
+        # slug). Writes 36 shards + sitemap.xml into football-index/.
+        run: node scripts/build-player-index.mjs --sport football --out football-index
+
+      - name: Upload the football index to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          n=0
+          # Shards are the 36 single-character files (0-9, a-z); anything else
+          # (the ratings-page snapshots) is uploaded below and not counted.
+          for f in football-index/?.json; do
+            npx --yes wrangler@4 r2 object put "inthegame-data/football/player-index/$(basename "$f")" --file "$f" --content-type application/json --cache-control "public, max-age=300" --remote
+            n=$((n + 1))
+          done
+          npx --yes wrangler@4 r2 object put inthegame-data/football/player-index/sitemap.xml --file football-index/sitemap.xml --content-type "application/xml; charset=utf-8" --cache-control "public, max-age=3600" --remote
+          echo "uploaded $n shards + sitemap.xml"
+          if [ "$n" -ne 36 ]; then echo "::error::expected 36 shards, uploaded $n"; exit 1; fi
+          # The ratings-page snapshots: top.json (/football/player-ratings) and
+          # team-top.json (/football/team-ratings). Optional: the builder skips
+          # one with a ::warning:: on failure, and its Function then serves the
+          # page without it (and ignores a copy older than 24 h).
+          for f in top team-top; do
+            if [ -f "football-index/$f.json" ]; then
+              npx --yes wrangler@4 r2 object put "inthegame-data/football/player-index/$f.json" --file "football-index/$f.json" --content-type application/json --cache-control "public, max-age=300" --remote
+              echo "uploaded $f.json"
+            fi
+          done
+          # The findable football team pages: 36 club shards + their sitemap,
+          # all-or-nothing (the builder writes the whole teams/ folder or none of
+          # it, and warns). Shards first, sitemap last, so the sitemap never
+          # lists a page whose shard has not landed.
+          if [ -d football-index/teams ]; then
+            t=0
+            for f in football-index/teams/?.json; do
+              npx --yes wrangler@4 r2 object put "inthegame-data/football/player-index/teams/$(basename "$f")" --file "$f" --content-type application/json --cache-control "public, max-age=300" --remote
+              t=$((t + 1))
+            done
+            if [ "$t" -ne 36 ]; then echo "::error::expected 36 team shards, uploaded $t"; exit 1; fi
+            npx --yes wrangler@4 r2 object put inthegame-data/football/player-index/teams/sitemap.xml --file football-index/teams/sitemap.xml --content-type "application/xml; charset=utf-8" --cache-control "public, max-age=3600" --remote
+            echo "uploaded $t team shards + teams/sitemap.xml"
+          fi
+
+      - name: Confirm the football index is served
+        run: |
+          # Every shard, cache-busted: a missing or stale one would 404 or
+          # serve an old summary for 1/36 of all players.
+          sleep 5
+          total=0
+          for k in 0 1 2 3 4 5 6 7 8 9 a b c d e f g h i j k l m n o p q r s t u v w x y z; do
+            curl -sS --fail "https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/football/player-index/$k.json?cb=$RANDOM" -o shard.json
+            c=$(node -e "
+              const s = JSON.parse(require('fs').readFileSync('shard.json','utf8'));
+              const age = Date.now() - Date.parse(s.built_at);
+              if (!(age < 15 * 60 * 1000)) { console.error('shard $k is', Math.round(age / 60000), 'minutes old'); process.exit(1); }
+              console.log(s.count);
+            ")
+            total=$((total + c))
+          done
+          echo "served football players: $total"
+          if [ "$total" -lt 10000 ]; then echo "::error::served football index has only $total players"; exit 1; fi
