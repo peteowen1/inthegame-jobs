@@ -21,6 +21,10 @@ concurrency:
   group: tennis-tour-draws
   cancel-in-progress: false
 
+# GITHUB_TOKEN is unused: the checkout uses ITG_READ_TOKEN, uploads use the Cloudflare token.
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
