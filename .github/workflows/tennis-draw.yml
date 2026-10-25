@@ -1,0 +1,135 @@
+# MOVED 2026-10-26 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes. The steps are
+# unchanged; only the checkout now pulls the private repo in. See README.md.
+#
+# Publish tennis/draw.json to R2 from ESPN's scoreboard.
+#
+# WHAT THIS REPLACES. draw.json was built by scripts/export-tennis-draw.py
+# reading a capture directory on one laptop and uploaded by hand, so it held
+# whatever was true the last time someone remembered to run it. On 2026-09-04 it
+# was two days stale and missing three first-round results, and the bracket gave
+# Rafael Jodar a 29% chance of the final eight days after he lost in round one.
+#
+# WHY IT RUNS HERE RATHER THAN IN THE WORKER. usopen.org's feeds drop datacenter
+# traffic (Cloudflare Workers 403; a GitHub runner gets an HTTP/2 stream reset),
+# and ESPN 403s Cloudflare too — but answers a GitHub runner in full. CI is the
+# only host we have that can read a live source, so the fetch happens here and
+# the page reads the file.
+name: Tennis draw
+
+on:
+  schedule:
+    # Hourly, and only in the months that contain a Grand Slam: January
+    # (Australian), May/June (Roland Garros), June/July (Wimbledon), August/
+    # September (US Open). Set when this ran in the private repo, where every
+    # run was billed at a one-minute minimum (hourly over a fortnight ~336
+    # minutes); free here, so the cadence could tighten if a page ever needs it.
+    # Nothing on the tennis pages is live-scored (the simulator consumes
+    # COMPLETED results only), and GitHub's cron is routinely 5-15 minutes late
+    # anyway, so a tighter schedule would buy nothing real.
+    - cron: "17 * * 1,5,6,7,8,9 *"
+  workflow_dispatch:
+
+concurrency:
+  group: tennis-draw
+  cancel-in-progress: false
+
+# GITHUB_TOKEN is unused: the checkout uses ITG_READ_TOKEN, uploads use the Cloudflare token.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Build draw.json from ESPN
+        id: build
+        run: |
+          # Exit 78 means "no Slam on today, nothing to publish" — most days in
+          # the scheduled months are not a Slam, and failing those would paint
+          # the Actions tab red for half the year and bury the failures that
+          # matter. Any OTHER non-zero exit is a real problem and fails the job:
+          # a stale file is recoverable, a file full of holes silently
+          # misinforms every tennis page.
+          set +e
+          node scripts/build-tennis-draw.mjs --out draw.json
+          rc=$?
+          set -e
+          if [ "$rc" = "78" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No Grand Slam singles draw today — skipping the upload."
+            exit 0
+          fi
+          [ "$rc" = "0" ] || exit "$rc"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "bytes=$(wc -c < draw.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Guard against publishing a thin file
+        if: steps.build.outputs.skip != 'true'
+        run: |
+          # Second, independent floor. The builder checks its own join rate;
+          # this checks the artefact itself, so a future refactor that loosens
+          # the first check still cannot ship a near-empty draw over a good one.
+          bytes=${{ steps.build.outputs.bytes }}
+          if [ "$bytes" -lt 20000 ]; then
+            echo "draw.json is only $bytes bytes - refusing to publish over the existing file"
+            exit 1
+          fi
+          node -e "
+            const d = JSON.parse(require('fs').readFileSync('draw.json','utf8'));
+            const t = d.tournaments[0];
+            let bad = 0;
+            for (const [k, v] of Object.entries(t.draws)) {
+              if (!v.slots || v.slots.length !== 128) { console.error(k, 'has', v.slots?.length, 'slots, expected 128'); bad++; }
+              if (!v.matches || !v.matches.length) { console.error(k, 'has no matches'); bad++; }
+              console.log(k + ':', v.matches.length, 'matches,', v.matches.filter(m => m.winner_slot != null).length, 'decided');
+            }
+            if (bad) process.exit(1);
+          "
+
+      - name: Upload to R2
+        if: steps.build.outputs.skip != 'true'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4"
+          # --remote is REQUIRED in wrangler v4 for R2 uploads; without it the
+          # write goes to a local simulation and the job passes having published
+          # nothing. max-age=300 matches the other tennis assets.
+          command: r2 object put inthegame-data/tennis/draw.json --file draw.json --content-type application/json --cache-control "public, max-age=300" --remote
+
+      - name: Confirm what is actually served
+        if: steps.build.outputs.skip != 'true'
+        run: |
+          # Trust the served copy, not the upload's exit code. A cache-busted
+          # request, because a normal one can return a stale edge copy and make
+          # a failed publish look fine.
+          sleep 5
+          url="https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/tennis/draw.json?cb=$RANDOM"
+          curl -sS "$url" -o served.json -w 'status=%{http_code} bytes=%{size_download}\n'
+          node -e "
+            const s = JSON.parse(require('fs').readFileSync('served.json','utf8')).tournaments[0];
+            console.log('served generated_at:', s.generated_at, '| source:', s.source);
+            for (const [k, v] of Object.entries(s.draws)) {
+              console.log(' ', k + ':', v.matches.length, 'matches,', v.matches.filter(m => m.winner_slot != null).length, 'decided');
+            }
+            const age = Date.now() - Date.parse(s.generated_at);
+            if (!(age < 15 * 60 * 1000)) { console.error('served copy is', Math.round(age / 60000), 'minutes old - the upload did not take'); process.exit(1); }
+          "

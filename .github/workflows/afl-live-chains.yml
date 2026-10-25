@@ -1,0 +1,107 @@
+# MOVED 2026-10-26 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes. The steps are
+# unchanged; only the checkout now pulls the private repo in. See README.md.
+#
+name: AFL Live Chains (EPV)
+
+on:
+  schedule:
+    - cron: "*/15 9-13 * 3-9 4,5"   # Thu-Fri, Mar-Sep
+    - cron: "*/15 3-13 * 3-9 6"     # Sat, Mar-Sep
+    - cron: "*/15 3-8 * 3-9 0"      # Sun, Mar-Sep
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# F-M13: the 15-min cron + 15-min timeout meant overlapping runs could race
+# each other's R2 puts (afl/live-chains.parquet + live-ratings/live-xg JSON)
+# out of order during a live game. cancel-in-progress: false queues a run
+# behind an in-flight one instead of killing it mid-upload.
+concurrency:
+  group: afl-live-r2-writer
+  cancel-in-progress: false
+
+jobs:
+  enrich-chains:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      - name: Checkout torp package
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/torp
+          path: torp
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
+        with:
+          r-version: "release"
+          use-public-rspm: true
+
+      - name: Install system libraries
+        run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev
+
+      - uses: r-lib/actions/setup-r-dependencies@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
+        with:
+          working-directory: torp
+          extra-packages: |
+            any::arrow
+            any::jsonlite
+            any::data.table
+            any::cli
+            any::devtools
+
+      - name: Enrich chains with EPV + compute ratings
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: Rscript scripts/enrich-live-chains.R
+
+      - name: Check outputs
+        run: |
+          if [ ! -f live-chains.parquet ]; then
+            echo "No output — no active matches. Skipping upload."
+            echo "SKIP_UPLOAD=true" >> $GITHUB_ENV
+          else
+            echo "Outputs:"
+            ls -la live-chains.parquet live-ratings.json live-xg.json 2>/dev/null || true
+          fi
+
+      - name: Upload chains parquet to R2
+        if: env.SKIP_UPLOAD != 'true'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4"
+          command: r2 object put inthegame-data/afl/live-chains.parquet --file live-chains.parquet --content-type application/octet-stream --cache-control "public, max-age=60" --remote
+
+      - name: Upload ratings JSON to R2
+        if: env.SKIP_UPLOAD != 'true' && hashFiles('live-ratings.json') != ''
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4"
+          command: r2 object put inthegame-data/afl/live-ratings.json --file live-ratings.json --content-type application/json --cache-control "public, max-age=60" --remote
+
+      - name: Upload xG JSON to R2
+        if: env.SKIP_UPLOAD != 'true' && hashFiles('live-xg.json') != ''
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4"
+          command: r2 object put inthegame-data/afl/live-xg.json --file live-xg.json --content-type application/json --cache-control "public, max-age=60" --remote

@@ -1,0 +1,98 @@
+# MOVED 2026-10-26 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes. The steps are
+# unchanged; only the checkout now pulls the private repo in. See README.md.
+#
+# Publish afl/turnover-points-<season>.json to R2: per player per match, the
+# points the other side scored straight after his turnovers, and the points
+# his side scored after he won the ball back. Built from torp's published
+# afl/chain-events-<season>-by-team.parquet (scripts/build-afl-turnover-points.mjs
+# has the rule). Read by the Turnovers tab of afl/player-stats.qmd.
+name: AFL turnover points
+
+on:
+  schedule:
+    # Daily, after torpdata's overnight build-blog-data. Off-season the file
+    # just rebuilds unchanged.
+    - cron: "23 21 * * *"
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Seasons to rebuild, space-separated (default: the current one)"
+        required: false
+        default: ""
+
+concurrency:
+  group: afl-turnover-points
+  cancel-in-progress: false
+
+# GITHUB_TOKEN is unused: the checkout uses ITG_READ_TOKEN, uploads use the Cloudflare token.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install hyparquet (reads torp's chain events)
+        run: npm ci --no-audit --no-fund
+
+      - name: Test the builder
+        run: node scripts/build-afl-turnover-points.test.mjs
+
+      - name: Build
+        id: build
+        env:
+          SEASONS: ${{ inputs.seasons }}
+        run: |
+          seasons="${SEASONS:-$(date -u +%Y)}"
+          built=""
+          for s in $seasons; do
+            # 78 = no chain events for that season yet: nothing to publish.
+            set +e
+            node --max-old-space-size=4096 scripts/build-afl-turnover-points.mjs --season "$s" --out "turnover-points-$s.json"
+            rc=$?
+            set -e
+            if [ "$rc" = "78" ]; then echo "no $s chain events yet, skipped"; continue; fi
+            [ "$rc" = "0" ] || exit "$rc"
+            built="$built $s"
+          done
+          echo "built=$built" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to R2
+        if: steps.build.outputs.built != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for s in ${{ steps.build.outputs.built }}; do
+            # --remote is REQUIRED in wrangler v4, or the write goes to a local
+            # simulation and the job passes having published nothing.
+            npx --yes wrangler@4 r2 object put "inthegame-data/afl/turnover-points-$s.json" --file "turnover-points-$s.json" \
+              --content-type application/json --cache-control "public, max-age=3600" --remote
+          done
+
+      - name: Confirm what is actually served
+        if: steps.build.outputs.built != ''
+        run: |
+          for s in ${{ steps.build.outputs.built }}; do
+            want=$(node -e "console.log(require('./turnover-points-$s.json').built_at)")
+            got=$(curl -fsS "https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/afl/turnover-points-$s.json?cb=$GITHUB_RUN_ID" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).built_at))")
+            echo "$s: built $want, served $got"
+            [ "$want" = "$got" ] || { echo "::error::R2 serves an older afl/turnover-points-$s.json"; exit 1; }
+          done

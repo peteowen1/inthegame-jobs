@@ -1,0 +1,87 @@
+# MOVED 2026-10-26 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes. The steps are
+# unchanged; only the checkout now pulls the private repo in. See README.md.
+#
+name: Daily Run deck snapshot
+
+# Builds the served Daily Run pool snapshots (#386 phase 1) — one immutable
+# JSON per (sport, UTC day) on R2, consumed by the cards pages' daily mode.
+# Runs just after UTC midnight and emits today + tomorrow, so every player
+# timezone always finds its date. NEVER overwrites an existing day: a deck
+# must not change mid-day (that was the fairness bug this exists to fix).
+
+on:
+  schedule:
+    - cron: "5 0 * * *"   # 00:05 UTC daily
+  workflow_dispatch:
+
+# GITHUB_TOKEN is unused: the checkout uses ITG_READ_TOKEN, uploads use the Cloudflare token.
+permissions:
+  contents: read
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Build deck snapshots
+        run: |
+          npm install --no-audit --no-fund
+          node scripts/build-daily-deck.mjs --out daily-deck-out
+
+      # always(), so a sport that built successfully still ships when its
+      # sibling failed. build-daily-deck.mjs isolates each sport and exits
+      # non-zero if any failed, so the job still reports failure — this only
+      # stops one sport's upstream schema drift from costing the other its
+      # deck, which is exactly what happened nightly from 2026-08-27 (AFL lost
+      # its `position` column; football's healthy deck never uploaded either).
+      # The immutability guard below is unchanged: an existing day is never
+      # overwritten, so a partial run cannot corrupt a live deck.
+      - name: Upload to R2 (skip existing days — decks are immutable)
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm install -g wrangler
+          uploaded=0; skipped=0
+          for f in daily-deck-out/football/daily-deck/*.json daily-deck-out/afl/daily-deck/*.json; do
+            [ -e "$f" ] || continue
+            key="${f#daily-deck-out/}"
+            # Immutability guard: ONLY a confirmed does-not-exist may upload.
+            # A transient get failure (5xx, network, auth) must NOT fall through
+            # to put — that would overwrite a live deck mid-day with a pool from
+            # a since-updated parquet, the exact fairness bug this prevents
+            # (PR #395 review). Fail the job instead; cron retries tomorrow and
+            # dispatch can be re-run.
+            if wrangler r2 object get "inthegame-data/$key" --file /tmp/exists-check.json --remote >/tmp/get-out.log 2>&1; then
+              echo "SKIP (exists, immutable): $key"
+              skipped=$((skipped + 1))
+            elif grep -qiE "not found|does not exist|404" /tmp/get-out.log; then
+              wrangler r2 object put "inthegame-data/$key" --file "$f" \
+                --content-type "application/json" \
+                --cache-control "public, max-age=86400, immutable" --remote
+              echo "UPLOADED: $key"
+              uploaded=$((uploaded + 1))
+            else
+              echo "::error::Existence check for $key failed for a non-404 reason — refusing to risk an overwrite:"
+              cat /tmp/get-out.log
+              exit 1
+            fi
+          done
+          echo "Done: $uploaded uploaded, $skipped skipped"
+          if [ $((uploaded + skipped)) -eq 0 ]; then echo "::error::No deck files produced"; exit 1; fi

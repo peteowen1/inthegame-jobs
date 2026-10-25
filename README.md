@@ -2,8 +2,8 @@
 
 Scheduled data jobs for [inthegame.blog](https://inthegame.blog), kept in a
 public repo because public repos get free GitHub Actions minutes. The site's
-own repo is private, and these jobs were about 760 of its ~3,700 billed minutes
-in October 2026.
+own repo is private, so every scheduled run there is billed (its October 2026
+bill was ~3,700 minutes).
 
 **No site code lives here.** Each run checks out the latest commit of the
 private `peteowen1/inthegame-blog` (no history) with a read-only token and runs
@@ -14,6 +14,11 @@ workflow files are in this repo.
 |---|---|---|
 | `tennis-tour-draws.yml` | `tennis/tour-draws.json` on R2 | every 3 hours at :41 |
 | `player-index.yml` | `afl/player-index.json`, `football/player-index/*` on R2 | every 6 hours at :23 |
+| `tennis-draw.yml` | `tennis/draw.json` on R2 (the Grand Slam in progress) | hourly at :17, in Jan and May-Sep only |
+| `daily-deck.yml` | `football/daily-deck/*`, `afl/daily-deck/*` on R2 (never overwrites a day) | daily 00:05 |
+| `afl-sim-snapshot.yml` | `afl/sim-snapshot.json` on R2 | every 6 hours at :41 |
+| `afl-turnover-points.yml` | `afl/turnover-points-<season>.json` on R2 | daily 21:23 |
+| `afl-live-chains.yml` | `afl/live-chains.parquet`, `afl/live-ratings.json`, `afl/live-xg.json` on R2 | every 15 min in AFL match windows, Mar-Sep |
 | `keepalive.yml` | nothing: re-enables the workflows above, since GitHub disables a public repo's schedules after 60 days without activity | 1st and 15th, 03:07 |
 
 ## Secrets

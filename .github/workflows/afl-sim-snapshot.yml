@@ -1,0 +1,73 @@
+# MOVED 2026-10-26 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes. The steps are
+# unchanged; only the checkout now pulls the private repo in. See README.md.
+#
+# Publish afl/sim-snapshot.json to R2: the AFL season simulation /afl/ladder
+# shows (premiership, top-4 and finals odds per club), built by running the
+# pages' own afl/season-live-sim.js in node (scripts/build-afl-sim-snapshot.mjs).
+# functions/afl/{ladder,simulator}.js write it into those pages' HTML for
+# crawlers that run no JavaScript, and ignore a copy older than 24 hours.
+name: AFL sim snapshot
+
+on:
+  schedule:
+    # Every 6 hours: a missed run or two still leaves the copy under the
+    # 24-hour limit. Set when this ran in the private repo, where every run was
+    # billed (~120 minutes a month); free here.
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: afl-sim-snapshot
+  cancel-in-progress: false
+
+# GITHUB_TOKEN is unused: the checkout uses ITG_READ_TOKEN, uploads use the Cloudflare token.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install hyparquet
+        run: npm ci --no-audit --no-fund
+
+      # Includes one real run of the pages' sim code against R2.
+      - name: Test the builder
+        run: node scripts/afl-sim-snapshot.test.mjs
+
+      - name: Build
+        run: node scripts/build-afl-sim-snapshot.mjs sim-snapshot.json
+
+      - name: Upload to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # --remote is REQUIRED in wrangler v4, or the write goes to a local
+          # simulation and the job passes having published nothing.
+          npx --yes wrangler@4 r2 object put "inthegame-data/afl/sim-snapshot.json" --file sim-snapshot.json \
+            --content-type application/json --cache-control "public, max-age=600" --remote
+
+      - name: Confirm what is actually served
+        run: |
+          want=$(node -e "console.log(require('./sim-snapshot.json').built_at)")
+          got=$(curl -fsS "https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/afl/sim-snapshot.json?cb=$GITHUB_RUN_ID" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).built_at))")
+          echo "built $want, served $got"
+          [ "$want" = "$got" ] || { echo "::error::R2 serves an older afl/sim-snapshot.json"; exit 1; }
