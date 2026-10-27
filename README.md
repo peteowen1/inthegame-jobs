@@ -18,7 +18,6 @@ workflow files are in this repo.
 | `daily-deck.yml` | `football/daily-deck/*`, `afl/daily-deck/*` on R2 (never overwrites a day) | daily 00:05 |
 | `afl-sim-snapshot.yml` | `afl/sim-snapshot.json` on R2 | every 6 hours at :41 |
 | `afl-turnover-points.yml` | `afl/turnover-points-<season>.json` on R2 | daily 21:23 |
-| `afl-live-chains.yml` | `afl/live-chains.parquet`, `afl/live-ratings.json`, `afl/live-xg.json` on R2 | every 15 min in AFL match windows, Mar-Sep |
 | `keepalive.yml` | nothing: re-enables the workflows above, since GitHub disables a public repo's schedules after 60 days without activity | 1st and 15th, 03:07 |
 
 ## Secrets
