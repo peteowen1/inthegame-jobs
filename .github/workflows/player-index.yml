@@ -12,7 +12,7 @@
 # (137k rows). Parsing that inside a Worker cron is at the mercy of the Worker
 # CPU limit; a GitHub runner parses it in seconds with the same hyparquet the
 # site already uses, and this repo already publishes JSON to R2 this way
-# (tennis-draw.yml, afl-live-chains.yml).
+# (tennis-draw.yml, afl-sim-snapshot.yml).
 name: Player index
 
 on:
