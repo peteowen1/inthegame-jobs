@@ -16,7 +16,7 @@ workflow files are in this repo.
 | `player-index.yml` | `afl/player-index.json`, `football/player-index/*` on R2 | every 6 hours at :23 |
 | `tennis-draw.yml` | `tennis/draw.json` on R2 (the Grand Slam in progress) | hourly at :17, in Jan and May-Sep only |
 | `daily-deck.yml` | `football/daily-deck/*`, `afl/daily-deck/*` on R2 (never overwrites a day) | daily 00:05 |
-| `afl-sim-snapshot.yml` | `afl/sim-snapshot.json` on R2 | every 6 hours at :41 |
+| `afl-sim-snapshot.yml` | `afl/sim-snapshot.json`, `afl/league-sim.json` on R2 | hourly at :41 |
 | `afl-turnover-points.yml` | `afl/turnover-points-<season>.json` on R2 | daily 21:23 |
 | `keepalive.yml` | nothing: re-enables the workflows above, since GitHub disables a public repo's schedules after 60 days without activity | 1st and 15th, 03:07 |
 
