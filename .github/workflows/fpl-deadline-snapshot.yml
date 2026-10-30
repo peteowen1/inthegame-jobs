@@ -1,13 +1,16 @@
 # FPL deadline snapshots for fplverse (peteowen1/fplverse#17). Unlike the other
 # workflows here it checks out nothing: it only saves public FPL API responses.
-# Hourly check; when the next FPL deadline is within 2 hours and GW not yet captured,
-# save bootstrap-static + fixtures RAW (gzipped) and upload as NEW uniquely-named assets
-# to this repo's `fpl-snapshots` release. Never --clobber.
-# inthegame-jobs is public, so the release is public (FPL API data is public anyway).
+# Every 30 minutes; on every run within 2 hours of the next FPL deadline, save
+# bootstrap-static + fixtures RAW (gzipped) as NEW uniquely-named assets on this
+# repo's `fpl-snapshots` release, so each gameweek gets up to 4 snapshots and the
+# last is at most ~30 minutes before the deadline (more if GitHub delays the run).
+# No "already captured" check, so a failed or partial run is simply followed by
+# the next one. Never --clobber. inthegame-jobs is public, so the release is
+# public (FPL API data is public anyway).
 name: fpl-deadline-snapshot
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -27,35 +30,36 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: fpl-snapshots
       UA: 'fplverse-snapshot (github.com/peteowen1/fplverse)'
-      FORCE: ${{ github.event.inputs.force }}   # string 'true'/'false' (not inputs.force; see boolean gotcha)
+      FORCE: ${{ github.event.inputs.force }}   # string 'true'/'false'; empty on schedule runs
     steps:
-      - name: Check deadline and existing captures
+      - name: Check deadline
         id: chk
         run: |
           set -euo pipefail
           curl -fsS -A "$UA" https://fantasy.premierleague.com/api/bootstrap-static/ -o bs.json
           read -r GW DEADLINE < <(jq -r '[.events[] | select(.is_next)][0] | "\(.id) \(.deadline_time)"' bs.json)
-          [ -n "$GW" ] && [ "$GW" != "null" ] || { echo "no next GW"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          [[ "$GW" =~ ^[0-9]+$ ]] || { echo "no next GW"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
           secs=$(( $(date -d "$DEADLINE" +%s) - $(date +%s) ))
           echo "GW$GW deadline $DEADLINE in ${secs}s"
-          have=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -c "^gw${GW}_" || true)
           go=false
-          if [ "$have" -gt 0 ]; then echo "GW$GW already captured"
-          elif [ "$secs" -gt 0 ] && [ "$secs" -le 7200 ]; then go=true
+          if [ "$secs" -gt 0 ] && [ "$secs" -le 7200 ]; then go=true
           elif [ "$FORCE" = "true" ]; then go=true
           fi
           { echo "go=$go"; echo "gw=$GW"; } >> "$GITHUB_OUTPUT"
       - name: Fetch raw and upload
         if: steps.chk.outputs.go == 'true'
+        env:
+          GW: ${{ steps.chk.outputs.gw }}
         run: |
           set -euo pipefail
-          GW=${{ steps.chk.outputs.gw }}
           STAMP=$(date -u +%Y%m%dT%H%M%SZ)
           curl -fsS -A "$UA" https://fantasy.premierleague.com/api/bootstrap-static/ -o "gw${GW}_${STAMP}_bootstrap-static.json"
           curl -fsS -A "$UA" https://fantasy.premierleague.com/api/fixtures/ -o "gw${GW}_${STAMP}_fixtures.json"
           jq -e '.elements | length > 300' "gw${GW}_${STAMP}_bootstrap-static.json" >/dev/null   # sanity: real payload
+          jq -e 'type == "array" and length > 0' "gw${GW}_${STAMP}_fixtures.json" >/dev/null
           gzip -9 gw${GW}_${STAMP}_*.json
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "FPL deadline snapshots" \
-              --notes "Raw FPL snapshots before each deadline. New assets only, never overwritten."
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest=false --title "FPL deadline snapshots" \
+              --notes "Raw FPL snapshots taken in the 2 hours before each deadline (every 30 minutes). New assets only, never overwritten."
           gh release upload "$TAG" gw${GW}_${STAMP}_*.json.gz -R "$GITHUB_REPOSITORY"   # no --clobber
+          echo "uploaded GW$GW snapshot $STAMP"

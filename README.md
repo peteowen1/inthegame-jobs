@@ -18,7 +18,7 @@ workflow files are in this repo.
 | `daily-deck.yml` | `football/daily-deck/*`, `afl/daily-deck/*` on R2 (never overwrites a day) | daily 00:05 |
 | `afl-sim-snapshot.yml` | `afl/sim-snapshot.json`, `afl/league-sim.json` on R2 | hourly at :41 |
 | `afl-turnover-points.yml` | `afl/turnover-points-<season>.json` on R2 | daily 21:23 |
-| `fpl-deadline-snapshot.yml` | raw FPL bootstrap-static + fixtures as new assets on this repo's `fpl-snapshots` release, once per gameweek within 2 hours of the deadline (for fplverse; no checkout) | hourly at :17 |
+| `fpl-deadline-snapshot.yml` | raw FPL bootstrap-static + fixtures as new assets on this repo's `fpl-snapshots` release, on every run within 2 hours of an FPL deadline (for fplverse; no checkout) | every 30 minutes at :17 and :47 |
 | `keepalive.yml` | nothing: re-enables the workflows above, since GitHub disables a public repo's schedules after 60 days without activity | 1st and 15th, 03:07 |
 
 ## Secrets
