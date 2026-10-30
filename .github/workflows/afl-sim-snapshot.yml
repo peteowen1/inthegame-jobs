@@ -7,14 +7,18 @@
 # pages' own afl/season-live-sim.js in node (scripts/build-afl-sim-snapshot.mjs).
 # functions/afl/{ladder,simulator}.js write it into those pages' HTML for
 # crawlers that run no JavaScript, and ignore a copy older than 24 hours.
+# Also afl/league-sim.json (inthegame-blog#1036): the same 100,000-season run
+# in full, with the signatures of its model and results; /afl/ladder and
+# /afl/team show it instead of simulating in the browser when theirs match.
 name: AFL sim snapshot
 
 on:
   schedule:
-    # Every 6 hours: a missed run or two still leaves the copy under the
-    # 24-hour limit. Set when this ran in the private repo, where every run was
-    # billed (~120 minutes a month); free here.
-    - cron: "41 */6 * * *"
+    # Hourly (was every 6 hours until 2026-10-30, #1036): afl/league-sim.json
+    # is what readers see once a result is in, so a finished game reaches it
+    # within the hour. ~25 s a run once the season is decided, ~3 min at its
+    # start (17 s per 10,000 seasons with nothing locked); free here.
+    - cron: "41 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -53,7 +57,7 @@ jobs:
         run: node scripts/afl-sim-snapshot.test.mjs
 
       - name: Build
-        run: node scripts/build-afl-sim-snapshot.mjs sim-snapshot.json
+        run: node scripts/build-afl-sim-snapshot.mjs sim-snapshot.json league-sim.json
 
       - name: Upload to R2
         env:
@@ -64,6 +68,10 @@ jobs:
           # simulation and the job passes having published nothing.
           npx --yes wrangler@4 r2 object put "inthegame-data/afl/sim-snapshot.json" --file sim-snapshot.json \
             --content-type application/json --cache-control "public, max-age=600" --remote
+          # Shorter cache: a page only adopts it when its results match, so a
+          # stale edge copy just means the browser simulates for a while.
+          npx --yes wrangler@4 r2 object put "inthegame-data/afl/league-sim.json" --file league-sim.json \
+            --content-type application/json --cache-control "public, max-age=300" --remote
 
       - name: Confirm what is actually served
         run: |
@@ -71,3 +79,6 @@ jobs:
           got=$(curl -fsS "https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/afl/sim-snapshot.json?cb=$GITHUB_RUN_ID" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).built_at))")
           echo "built $want, served $got"
           [ "$want" = "$got" ] || { echo "::error::R2 serves an older afl/sim-snapshot.json"; exit 1; }
+          got=$(curl -fsS "https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/afl/league-sim.json?cb=$GITHUB_RUN_ID" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).built_at))")
+          echo "league-sim: built $want, served $got"
+          [ "$want" = "$got" ] || { echo "::error::R2 serves an older afl/league-sim.json"; exit 1; }
