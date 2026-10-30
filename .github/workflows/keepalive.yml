@@ -24,7 +24,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for wf in player-index.yml tennis-tour-draws.yml tennis-draw.yml daily-deck.yml afl-sim-snapshot.yml afl-turnover-points.yml keepalive.yml; do
+          for wf in player-index.yml tennis-tour-draws.yml tennis-draw.yml daily-deck.yml afl-sim-snapshot.yml afl-turnover-points.yml fpl-deadline-snapshot.yml keepalive.yml; do
             gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/enable"
             echo "enabled $wf: $(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf" --jq .state)"
           done
