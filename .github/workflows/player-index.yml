@@ -99,6 +99,16 @@ jobs:
         # slug). Writes 36 shards + sitemap.xml into football-index/.
         run: node scripts/build-player-index.mjs --sport football --out football-index
 
+      - name: Save the served sitemaps for IndexNow
+        # The copies being served before this run's upload, so the IndexNow
+        # step can tell which pages are new or changed. A failed fetch leaves
+        # an empty file, and that step then submits nothing.
+        run: |
+          mkdir -p old-sitemaps
+          r2=https://pub-ee4bf5b599a047f9ac2b9facc1587008.r2.dev/football/player-index
+          curl -sS --compressed --fail "$r2/sitemap.xml?cb=$RANDOM" -o old-sitemaps/players.xml || : > old-sitemaps/players.xml
+          curl -sS --compressed --fail "$r2/teams/sitemap.xml?cb=$RANDOM" -o old-sitemaps/teams.xml || : > old-sitemaps/teams.xml
+
       - name: Upload the football index to R2
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -158,3 +168,17 @@ jobs:
           done
           echo "served football players: $total"
           if [ "$total" -lt 10000 ]; then echo "::error::served football index has only $total players"; exit 1; fi
+
+      - name: Tell IndexNow about new or changed player and club pages
+        # Bing, and the search behind ChatGPT and Copilot. Player pages change
+        # with this index, not with a site deploy, so the deploy's own IndexNow
+        # step never sends them. Sends the URLs whose lastmod moved since the
+        # copy saved above (scripts/indexnow-sitemap-diff.mjs). Never fails the
+        # run: the index is already published.
+        continue-on-error: true
+        run: |
+          # The script lives in inthegame-blog; skip quietly until its main has it.
+          if [ ! -f scripts/indexnow-sitemap-diff.mjs ]; then echo "indexnow-sitemap-diff.mjs not on main yet; skipped"; exit 0; fi
+          pairs="--pair old-sitemaps/players.xml,football-index/sitemap.xml"
+          if [ -f football-index/teams/sitemap.xml ]; then pairs="$pairs --pair old-sitemaps/teams.xml,football-index/teams/sitemap.xml"; fi
+          node scripts/indexnow-sitemap-diff.mjs $pairs
