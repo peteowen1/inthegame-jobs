@@ -110,6 +110,7 @@ jobs:
           curl -sS --compressed --fail "$r2/teams/sitemap.xml?cb=$RANDOM" -o old-sitemaps/teams.xml || : > old-sitemaps/teams.xml
 
       - name: Upload the football index to R2
+        id: upload_football
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -174,7 +175,11 @@ jobs:
         # with this index, not with a site deploy, so the deploy's own IndexNow
         # step never sends them. Sends the URLs whose lastmod moved since the
         # copy saved above (scripts/indexnow-sitemap-diff.mjs). Never fails the
-        # run: the index is already published.
+        # run: the index is already published. Runs even when the served check
+        # above fails, as long as the upload succeeded: R2 then serves the new
+        # sitemaps, which the next run compares against, so a skipped ping here
+        # would be lost.
+        if: ${{ always() && steps.upload_football.outcome == 'success' }}
         continue-on-error: true
         run: |
           # The script lives in inthegame-blog; skip quietly until its main has it.
