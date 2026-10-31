@@ -57,7 +57,7 @@ jobs:
         run: node scripts/afl-sim-snapshot.test.mjs
 
       - name: Build
-        run: node scripts/build-afl-sim-snapshot.mjs sim-snapshot.json league-sim.json
+        run: node scripts/build-afl-sim-snapshot.mjs sim-snapshot.json league-sim.json league-sim-history.json
 
       - name: Upload to R2
         env:
@@ -68,6 +68,15 @@ jobs:
           # simulation and the job passes having published nothing.
           npx --yes wrangler@4 r2 object put "inthegame-data/afl/sim-snapshot.json" --file sim-snapshot.json \
             --content-type application/json --cache-control "public, max-age=600" --remote
+          # The season's flag-odds history (inthegame-blog#805), only when this
+          # run saved a round (the builder writes no file otherwise; an older
+          # builder ignores the third argument). Before league-sim.json, whose
+          # `history` field points at it.
+          if [ -f league-sim-history.json ]; then
+            season=$(node -e "console.log(require('./league-sim-history.json').season)")
+            npx --yes wrangler@4 r2 object put "inthegame-data/afl/league-sim-history-$season.json" --file league-sim-history.json \
+              --content-type application/json --cache-control "public, max-age=300" --remote
+          fi
           # Shorter cache: a page only adopts it when its results match, so a
           # stale edge copy just means the browser simulates for a while.
           npx --yes wrangler@4 r2 object put "inthegame-data/afl/league-sim.json" --file league-sim.json \
