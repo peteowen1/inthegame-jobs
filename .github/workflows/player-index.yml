@@ -202,3 +202,20 @@ jobs:
           pairs="--pair old-sitemaps/players.xml,football-index/sitemap.xml"
           if [ -f football-index/teams/sitemap.xml ]; then pairs="$pairs --pair old-sitemaps/teams.xml,football-index/teams/sitemap.xml"; fi
           node scripts/indexnow-sitemap-diff.mjs $pairs
+
+      - name: Build and upload the football match-id index
+        # football/match-ids/<league>.json: the match page's fast Opta id
+        # lookup (inthegame-blog scripts/build-football-match-ids.mjs, #1101).
+        # Independent of the player indexes, so it runs even if a step above
+        # failed. The builder refuses to write fewer than 2,000 rows; a stale
+        # file only costs the page its fast path.
+        if: ${{ !cancelled() }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          node scripts/build-football-match-ids.mjs --out match-ids
+          npx --yes wrangler@4 --version
+          ls match-ids/*.json | xargs -P 8 -I{} sh -c 'npx --yes wrangler@4 r2 object put "inthegame-data/football/match-ids/$(basename "$1")" --file "$1" --content-type application/json --cache-control "public, max-age=300" --remote' _ {}
+          echo "uploaded $(ls match-ids/*.json | wc -l) match-id files"
