@@ -1,0 +1,275 @@
+# MOVED 2026-11-04 from inthegame-blog/.github/workflows/ to this public repo
+# (peteowen1/inthegame-jobs), which gets free Actions minutes (it was ~13 billed
+# minutes a night there). The steps are unchanged except three things: the
+# checkout pulls the private site repo in (ITG_READ_TOKEN, like player-index.yml),
+# issues are filed on inthegame-blog with WATCHDOG_ISSUES_TOKEN (fine-grained,
+# Issues read/write on inthegame-blog only) via WATCHDOG_ISSUES_REPO, and the
+# Claude Console rule is itg-watchdog-jobs (fdrl_01Sjf1secb4B6gYcJNdFmHTH), which
+# matches repo:peteowen1/inthegame-jobs:ref:refs/heads/main.
+#
+# Site watchdog: load every live page in headless Chrome (scripts/watchdog/
+# probe.mjs), then one Claude call judges the results (judge.mjs).
+# Plan: docs/plans/SITE-WATCHDOG-2026-10-08.md
+#
+# PHASE 3 (since 2026-10-22): the two readers' findings are filed as GitHub
+# issues (scripts/watchdog/file-issues.mjs). Since 2026-10-25 the Sonnet
+# judge's high and medium findings are filed too (one issue per page); its low
+# ones stay in the job summary and the artifact.
+#
+# Auth is Workload Identity Federation, not a stored API key: GitHub issues a
+# short-lived OIDC token, the SDK swaps it for an Anthropic token. The rule in
+# the Claude Console matches repo:peteowen1/inthegame-jobs:ref:refs/heads/main,
+# so only runs on main (schedule, manual dispatch) can authenticate. The IDs
+# are repository variables, not secrets: they identify, they do not grant.
+# Without them (or with no credits) the judge step still passes and the
+# summary lists the probe's own FAILs, unjudged.
+name: Site watchdog
+
+on:
+  # The on-time trigger is the API worker: its */30 cron dispatches this
+  # workflow at 19:00 UTC (05:00 AEST, inthegame-blog worker/src/site-watchdog-dispatch.js).
+  # GitHub's own schedule stays as the FALLBACK: it ran 3 h 19 min to 4 h 20 min
+  # late on every night measured (2026-10-08 to 10-11), even off the half-hour.
+  # The gate job below skips whichever trigger arrives second.
+  schedule:
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if a watchdog run already covered the last 12 hours"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read # download the previous night's report
+  id-token: write # GitHub OIDC token for the Claude API (federation)
+  # Issues are filed on inthegame-blog with WATCHDOG_ISSUES_TOKEN, not this
+  # repo's GITHUB_TOKEN, so no issues permission here.
+
+concurrency:
+  group: site-watchdog
+  cancel-in-progress: false
+
+jobs:
+  # One real run per night. A run started in the last 12 hours whose watchdog
+  # job did not skip (queued, running, passed or failed) already covers
+  # tonight, so a duplicate worker fire or the late GitHub schedule stops here
+  # in seconds instead of spending a Claude call. Only EARLIER runs count (run
+  # ids only grow): the concurrency group queues a later one behind this one,
+  # and it must not make this one skip. Manual runs pass force to override.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          go() { echo "run=$1" >> "$GITHUB_OUTPUT"; }
+          if [ "$FORCE" = "true" ]; then echo "forced"; go true; exit 0; fi
+          since=$(( $(date -u +%s) - 12 * 3600 ))
+          q="[.[] | select(.databaseId < $GITHUB_RUN_ID) | select((.createdAt | fromdateiso8601) > $since)"
+          q="$q | select(.status != \"completed\" or .conclusion == \"success\" or .conclusion == \"failure\") | .databaseId] | .[]"
+          # A gh error must not cost a night: run anyway and say so.
+          if ! ids=$(gh run list -R "$GITHUB_REPOSITORY" --workflow site-watchdog.yml --limit 10 --json databaseId,createdAt,status,conclusion --jq "$q"); then
+            echo "::warning::could not list earlier watchdog runs; running anyway"; go true; exit 0
+          fi
+          for id in $ids; do
+            job=$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name == "watchdog") | (if (.conclusion // "") == "" then .status else .conclusion end)] | first // "queued"')
+            if [ "$job" != "skipped" ]; then
+              echo "Skipped: run $id already covers tonight (its watchdog job: $job)" | tee -a "$GITHUB_STEP_SUMMARY"
+              go false; exit 0
+            fi
+          done
+          go true
+
+  watchdog:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The report is dated in the site's own time zone, not the runner's UTC.
+      TZ: Australia/Melbourne
+    steps:
+      # The scripts live in the private site repo; this public repo holds only
+      # the workflow. Latest commit of main, no history, token not kept in .git.
+      - name: Checkout inthegame-blog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: peteowen1/inthegame-blog
+          ref: main
+          token: ${{ secrets.ITG_READ_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - run: npm ci --omit=optional
+      - name: Judge state tests (baseline carry-forward, alarm)
+        run: node scripts/watchdog/judge.test.mjs
+
+      - name: Previous night's report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Any completed run, not only successful ones: a night that went red
+        # (judge alarm) still carries the baseline and the unavailable streak
+        # forward. Skipping it would reset the streak and the alarm would never
+        # fire twice. Newest run with an artifact wins.
+        # A gh error is not "no previous night": it would quietly restart the
+        # streak, so every failure is written to the job summary.
+        run: |
+          warn() { echo "::warning::$1"; echo "> Warning: $1" >> "$GITHUB_STEP_SUMMARY"; }
+          if ! ids=$(gh run list -R "$GITHUB_REPOSITORY" --workflow site-watchdog.yml --status completed --limit 10 --json databaseId --jq '.[].databaseId'); then
+            warn "could not list previous watchdog runs; the unavailable streak restarts tonight"; exit 0
+          fi
+          for id in $ids; do
+            # Runs the gate skipped never made a report; pass over them quietly.
+            [ "$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json jobs --jq '[.jobs[] | select(.name == "watchdog") | .conclusion] | first // ""')" = "skipped" ] && continue
+            if gh run download "$id" -R "$GITHUB_REPOSITORY" -n watchdog -D .watchdog/prev; then
+              echo "previous night from run $id"; exit 0
+            fi
+            warn "no watchdog artifact downloadable from run $id; trying an older run"
+          done
+          echo "no previous report; every finding will read as new"
+
+      - name: Probe every page
+        run: node scripts/watchdog/probe.mjs --out .watchdog/run
+
+      # Fetched here, after the ~6 minute probe, not at the top of the job:
+      # a GitHub OIDC token expires about five minutes after it is issued.
+      # --retry (all three fetches): on 2026-10-19 both reader fetches got a
+      # 503 from GitHub's token endpoint, and the readers read 0 of 53 pages.
+      # jq -e, not -r alone: a failed fetch would otherwise write the string
+      # "null" into the file and surface as an opaque "Authentication failed".
+      - name: Fetch GitHub OIDC token
+        if: vars.ANTHROPIC_FEDERATION_RULE_ID != ''
+        # A failed fetch leaves no token file; the judge then reports
+        # "judge: unavailable" with the probe's FAILs instead of the job dying.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          curl -sSf --retry 5 --retry-delay 10 --retry-connrefused -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+            | jq -er .value > "$RUNNER_TEMP/gha-jwt" \
+            || { echo "> Warning: the GitHub OIDC token fetch failed, so the judge cannot sign in tonight." >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+
+      - name: Judge (its high and medium findings are filed by the last step)
+        env:
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/gha-jwt
+        run: node scripts/watchdog/judge.mjs --dir .watchdog/run --prev .watchdog/prev
+
+      # Freshness reader (docs/plans/SITE-FRESHNESS-2026-10-17.md, layer 2): each
+      # page's visible text plus today's date to Haiku 5.5, "what here is wrong
+      # for this date?". Its own OIDC token: the judge's may be past its ~5
+      # minute life by now. Dry run like the judge: findings go to the job
+      # summary and the artifact; issue filing comes after 3 nights of tuning.
+      - name: Fetch GitHub OIDC token for the freshness reader
+        if: always() && vars.ANTHROPIC_FEDERATION_RULE_ID != ''
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          curl -sSf --retry 5 --retry-delay 10 --retry-connrefused -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+            | jq -er .value > "$RUNNER_TEMP/gha-jwt" \
+            || { echo "> Warning: the OIDC token fetch for the freshness reader failed." >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+
+      - name: Freshness reader tests
+        run: node scripts/watchdog/freshness-judge.test.mjs
+
+      - name: Freshness reader (dry run, files nothing)
+        if: always()
+        continue-on-error: true
+        env:
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/gha-jwt
+        run: node scripts/watchdog/freshness-judge.mjs --dir .watchdog/run
+
+      # Consistency reader: the same reader with --lens consistency, "does any
+      # number on this page disagree with another on the same page?" (UX
+      # invariant #1). Own OIDC token again, for the same reason. Dry run.
+      - name: Fetch GitHub OIDC token for the consistency reader
+        if: always() && vars.ANTHROPIC_FEDERATION_RULE_ID != ''
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          curl -sSf --retry 5 --retry-delay 10 --retry-connrefused -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+            | jq -er .value > "$RUNNER_TEMP/gha-jwt" \
+            || { echo "> Warning: the OIDC token fetch for the consistency reader failed." >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+
+      - name: Consistency reader (dry run, files nothing)
+        if: always()
+        continue-on-error: true
+        env:
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/gha-jwt
+        run: node scripts/watchdog/freshness-judge.mjs --dir .watchdog/run --lens consistency
+
+      # Phase 3 (Pete's go 2026-10-22): the readers' findings become issues
+      # labelled `watchdog`, one per page and kind, updated in place on later
+      # nights, skipped when scripts/watchdog/known-issues.json names an open
+      # issue for it, closed after 2 nights the page is read and it is gone.
+      # Main only: a dispatch from another branch must not file. Not
+      # continue-on-error: a filing failure turns the run red.
+      - name: Issue filer tests
+        if: always()
+        run: node scripts/watchdog/file-issues.test.mjs
+
+      - name: File watchdog issues
+        if: always() && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.WATCHDOG_ISSUES_TOKEN }}
+          WATCHDOG_ISSUES_REPO: peteowen1/inthegame-blog
+        run: node scripts/watchdog/file-issues.mjs --dir .watchdog/run
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: watchdog
+          path: |
+            .watchdog/run/report.json
+            .watchdog/run/summary.md
+            .watchdog/run/judge.json
+            .watchdog/run/judge.md
+            .watchdog/run/baseline.json
+            .watchdog/run/freshness.json
+            .watchdog/run/freshness.md
+            .watchdog/run/consistency.json
+            .watchdog/run/consistency.md
+            .watchdog/run/issues.md
+            .watchdog/run/text/
+            .watchdog/run/shots/
+          retention-days: 14
+          # .watchdog/ is a dot-directory, which upload-artifact skips by
+          # default: without this the artifact is silently empty, and every
+          # night starts with no baseline and a streak of 1.
+          include-hidden-files: true
+          # A re-run of the same run uploads under the same name.
+          overwrite: true
+          if-no-files-found: error
+
+      # The readers' steps are continue-on-error so one lens cannot stop the
+      # other, which also meant a night they read nothing went green (2026-10-19:
+      # 53 of 53 NOT READ, run green). Red here, after the report is kept, when a
+      # reader wrote no result, could not sign in, or left over 10% of pages
+      # unread (night 1's 16 of 54 max_tokens stops would have gone red too).
+      - name: Fail if a reader missed the night
+        if: always() && vars.ANTHROPIC_FEDERATION_RULE_ID != ''
+        run: |
+          bash scripts/watchdog/check-readers.test.sh
+          bash scripts/watchdog/check-readers.sh .watchdog/run
