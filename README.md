@@ -19,6 +19,7 @@ workflow files are in this repo.
 | `afl-sim-snapshot.yml` | `afl/sim-snapshot.json`, `afl/league-sim.json` on R2 | hourly at :41 |
 | `afl-turnover-points.yml` | `afl/turnover-points-<season>.json` on R2 | daily 21:23 |
 | `fpl-deadline-snapshot.yml` | raw FPL bootstrap-static + fixtures as new assets on this repo's `fpl-snapshots` release, on every run within 2 hours of an FPL deadline (for fplverse; no checkout) | every 30 minutes at :17 and :47 |
+| `site-watchdog.yml` | nothing on R2: loads every live page, a Claude call judges them, files `watchdog` issues on inthegame-blog (moved here 2026-11-04) | the inthegame-blog Worker dispatches it at 19:00; own fallback 19:17 |
 | `keepalive.yml` | nothing: re-enables the workflows above, since GitHub disables a public repo's schedules after 60 days without activity | 1st and 15th, 03:07 |
 
 ## Secrets
@@ -28,6 +29,9 @@ workflow files are in this repo.
 | `ITG_READ_TOKEN` | Fine-grained PAT, repository `peteowen1/inthegame-blog` only, **Contents: Read-only**. Expires about 2027-10-24; when it does, every checkout fails red. Make a new one with the same settings and replace the secret. |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API token with **Workers R2 Storage: Edit** on the inthegame.blog account |
 | `CLOUDFLARE_ACCOUNT_ID` | The inthegame.blog Cloudflare account id |
+| `WATCHDOG_ISSUES_TOKEN` | Fine-grained PAT `inthegame-jobs-watchdog-issues`, repository `peteowen1/inthegame-blog` only, **Issues: Read and write** (made 2026-11-04, 1-year expiry). `site-watchdog.yml` files its issues with it. |
+
+Variables (not secrets: they identify, they do not grant): `ANTHROPIC_FEDERATION_RULE_ID` (Claude Console rule `itg-watchdog-jobs`), `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID`. The rule matches this repo's ID-style OIDC subject, `repo:peteowen1@15244843/inthegame-jobs@1432000220:ref:refs/heads/main`, not the name-style one.
 
 Secrets are never given to pull requests from forks, and no workflow here has
 a `pull_request` trigger.
@@ -36,7 +40,7 @@ a `pull_request` trigger.
 
 - **Logs are public.** Never print file contents, environment or tokens. The
   scripts print feed names and counts only.
-- **No artifacts.** They would be public, and the checked-out code is private.
+- **No artifacts.** They would be public, and the checked-out code is private. **One exception, OK'd by Pete 2026-11-05:** `site-watchdog.yml` keeps a nightly `watchdog` artifact (its probe, judge and reader output, page text and screenshots of the public site; nothing from the checkout) because the next night reads it as its baseline.
 - **Never add a self-hosted runner.** On a public repo it lets anyone's code
   run on that machine.
 - Change a script in `inthegame-blog`, not here. A workflow change here should
