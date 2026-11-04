@@ -40,7 +40,7 @@ a `pull_request` trigger.
 
 - **Logs are public.** Never print file contents, environment or tokens. The
   scripts print feed names and counts only.
-- **No artifacts.** They would be public, and the checked-out code is private. **One exception, pending Pete's OK (2026-11-04):** `site-watchdog.yml` keeps a nightly `watchdog` artifact (its probe, judge and reader output, page text and screenshots of the public site; nothing from the checkout) because the next night reads it as its baseline.
+- **No artifacts.** They would be public, and the checked-out code is private. **One exception, OK'd by Pete 2026-11-05:** `site-watchdog.yml` keeps a nightly `watchdog` artifact (its probe, judge and reader output, page text and screenshots of the public site; nothing from the checkout) because the next night reads it as its baseline.
 - **Never add a self-hosted runner.** On a public repo it lets anyone's code
   run on that machine.
 - Change a script in `inthegame-blog`, not here. A workflow change here should
