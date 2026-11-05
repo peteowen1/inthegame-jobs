@@ -16,7 +16,7 @@ workflow files are in this repo.
 | `player-index.yml` | `afl/player-index.json`, `football/player-index/*` on R2 | every 6 hours at :23 |
 | `tennis-draw.yml` | `tennis/draw.json` on R2 (the Grand Slam in progress) | hourly at :17, in Jan and May-Sep only |
 | `daily-deck.yml` | `football/daily-deck/*`, `afl/daily-deck/*` on R2 (never overwrites a day) | daily 00:05 |
-| `afl-sim-snapshot.yml` | `afl/sim-snapshot.json`, `afl/league-sim.json` on R2 | hourly at :41 |
+| `afl-sim-snapshot.yml` | `afl/sim-snapshot.json`, `afl/league-sim.json` on R2 | hourly: the inthegame-blog Worker dispatches it on every :00 tick (since 2026-11-05); own fallback every 6 hours at :41 |
 | `afl-turnover-points.yml` | `afl/turnover-points-<season>.json` on R2 | daily 21:23 |
 | `fpl-deadline-snapshot.yml` | raw FPL bootstrap-static + fixtures as new assets on this repo's `fpl-snapshots` release, on every run within 2 hours of an FPL deadline (for fplverse; no checkout) | every 30 minutes at :17 and :47 |
 | `site-watchdog.yml` | nothing on R2: loads every live page, a Claude call judges them, files `watchdog` issues on inthegame-blog (moved here 2026-11-04) | the inthegame-blog Worker dispatches it at 19:00; own fallback 19:17 |
