@@ -5,7 +5,8 @@
 # repo's `fpl-snapshots` release, so each gameweek gets up to 4 snapshots and the
 # last is at most ~30 minutes before the deadline (more if GitHub delays the run).
 # Pre-season (while GW1 is the next gameweek, i.e. from FPL's summer reset to the GW1
-# deadline) it also saves once a week, on the Monday runs in the 03:00 UTC hour (1-2 a week),
+# deadline) it also saves once a week, on the Monday runs in the 03:00 UTC hour (1-2 a week;
+# 1pm Monday in Sydney, AEST, which covers the pre-season),
 # so the pre-season flags and news are kept too (Pete, 2026-11-09: weekly, not daily).
 # No "already captured" check, so a failed or partial run is simply followed by
 # the next one. Never --clobber. inthegame-jobs is public, so the release is
