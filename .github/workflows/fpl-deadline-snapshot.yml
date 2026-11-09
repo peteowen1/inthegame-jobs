@@ -5,8 +5,9 @@
 # repo's `fpl-snapshots` release, so each gameweek gets up to 4 snapshots and the
 # last is at most ~30 minutes before the deadline (more if GitHub delays the run).
 # Pre-season (while GW1 is the next gameweek, i.e. from FPL's summer reset to the GW1
-# deadline) it also saves on the runs in the 03:00 UTC hour every day (1-2 a day), so the
-# flags and news managers saw on their draft or auction day are kept too (Pete, 2026-11-09).
+# deadline) it also saves once a week, on the Monday runs in the 03:00 UTC hour (1-2 a week;
+# 1pm Monday in Sydney, AEST, which covers the pre-season),
+# so the pre-season flags and news are kept too (Pete, 2026-11-09: weekly, not daily).
 # No "already captured" check, so a failed or partial run is simply followed by
 # the next one. Never --clobber. inthegame-jobs is public, so the release is
 # public (FPL API data is public anyway).
@@ -46,7 +47,7 @@ jobs:
           echo "GW$GW deadline $DEADLINE in ${secs}s"
           go=false
           if [ "$secs" -gt 0 ] && [ "$secs" -le 7200 ]; then go=true
-          elif [ "$GW" = "1" ] && [ "$secs" -gt 0 ] && [ "$(date -u +%H)" = "03" ]; then go=true; echo "pre-season daily snapshot"
+          elif [ "$GW" = "1" ] && [ "$secs" -gt 0 ] && [ "$(date -u +%u%H)" = "103" ]; then go=true; echo "pre-season weekly snapshot"
           elif [ "$FORCE" = "true" ]; then go=true
           fi
           { echo "go=$go"; echo "gw=$GW"; } >> "$GITHUB_OUTPUT"
@@ -64,6 +65,6 @@ jobs:
           gzip -9 gw${GW}_${STAMP}_*.json
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest=false --title "FPL deadline snapshots" \
-              --notes "Raw FPL snapshots taken in the 2 hours before each deadline (every 30 minutes), plus daily before GW1. New assets only, never overwritten."
+              --notes "Raw FPL snapshots taken in the 2 hours before each deadline (every 30 minutes), plus weekly before GW1. New assets only, never overwritten."
           gh release upload "$TAG" gw${GW}_${STAMP}_*.json.gz -R "$GITHUB_REPOSITORY"   # no --clobber
           echo "uploaded GW$GW snapshot $STAMP"
