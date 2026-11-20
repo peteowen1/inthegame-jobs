@@ -69,21 +69,33 @@ jobs:
         run: |
           # --remote is REQUIRED in wrangler v4, or the write goes to a local
           # simulation and the job passes having published nothing.
-          npx --yes wrangler@4 r2 object put "inthegame-data/afl/sim-snapshot.json" --file sim-snapshot.json \
-            --content-type application/json --cache-control "public, max-age=600" --remote
+          # Three tries, 20 s apart: R2 answers a put with "500: Internal Server
+          # Error" now and then (6 of 182 runs, 14-21 Nov 2026), and one failed
+          # put used to fail the run and leave the page an hour older.
+          put() {
+            local n
+            for n in 1 2 3; do
+              npx --yes wrangler@4 r2 object put "$@" --remote && return 0
+              echo "::warning::R2 put failed (try $n of 3): $1"
+              [ "$n" = 3 ] || sleep 20
+            done
+            return 1
+          }
+          put "inthegame-data/afl/sim-snapshot.json" --file sim-snapshot.json \
+            --content-type application/json --cache-control "public, max-age=600"
           # The season's flag-odds history (inthegame-blog#805), only when this
           # run saved a round (the builder writes no file otherwise; an older
           # builder ignores the third argument). Before league-sim.json, whose
           # `history` field points at it.
           if [ -f league-sim-history.json ]; then
             season=$(node -e "console.log(require('./league-sim-history.json').season)")
-            npx --yes wrangler@4 r2 object put "inthegame-data/afl/league-sim-history-$season.json" --file league-sim-history.json \
-              --content-type application/json --cache-control "public, max-age=300" --remote
+            put "inthegame-data/afl/league-sim-history-$season.json" --file league-sim-history.json \
+              --content-type application/json --cache-control "public, max-age=300"
           fi
           # Shorter cache: a page only adopts it when its results match, so a
           # stale edge copy just means the browser simulates for a while.
-          npx --yes wrangler@4 r2 object put "inthegame-data/afl/league-sim.json" --file league-sim.json \
-            --content-type application/json --cache-control "public, max-age=300" --remote
+          put "inthegame-data/afl/league-sim.json" --file league-sim.json \
+            --content-type application/json --cache-control "public, max-age=300"
 
       - name: Confirm what is actually served
         run: |
