@@ -66,10 +66,11 @@ jobs:
       - name: Build tour-draws.json
         id: build
         run: |
-          # 78 = no tour-level WTA event in progress (or none has its draw yet):
-          # nothing to publish, R2 keeps the previous file. Anything else
-          # non-zero fails the job, because the builder only refuses when the
-          # feed's shape stopped matching what it checks.
+          # With no tour event in progress the builder writes an empty list and
+          # exits 0 (since 2026-11-21), so the file says "nothing on" instead of
+          # keeping the last event for the whole off-season. 78 was its old
+          # "nothing to publish" code; the branch stays for a builder on main
+          # that still returns it. Anything else non-zero fails the job.
           set +e
           node scripts/build-tennis-tour-draw.mjs --out tour-draws.json
           rc=$?
